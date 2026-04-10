@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pymongo import MongoClient
@@ -20,6 +21,7 @@ class MongoApp:
         self.coll_1 = "orders"
         self.coll_2 = "parts"
         self.coll_3 = "claims"
+        self.coll_4 = "faults"
 
         # --- Asistente de garantía ---
         self.assistant = WarrantyAssistant()
@@ -39,16 +41,15 @@ class MongoApp:
                                  command=lambda: self.open_viewer(self.coll_2))
         options_menu.add_command(label="3. Ver acreditaciones",
                                  command=lambda: self.open_viewer(self.coll_3))
+        options_menu.add_command(label="4. Ver desvíos",
+                                 command=lambda: self.open_viewer(self.coll_4))
         options_menu.add_separator()
         options_menu.add_command(label="Consulta por orden", command=self.open_order_query)
+        options_menu.add_command(label="Ingresar desvío", command=self.open_fault_form)
         options_menu.add_separator()
         options_menu.add_command(label="Exit", command=self.root.quit)
 
-        asistente_menu = tk.Menu(menubar, tearoff=0)
-        asistente_menu.add_command(label="Abrir asistente", command=self.open_warranty_assistant)
-
         menubar.add_cascade(label="Inicio", menu=options_menu)
-        menubar.add_cascade(label="🤖 Asistente IA", menu=asistente_menu)
 
         self.root.config(menu=menubar)
 
@@ -215,6 +216,24 @@ class MongoApp:
         lbl_no_claims = tk.Label(frame_claims, text="", font=("Arial", 10, "italic"), fg="#888888")
         lbl_no_claims.pack(pady=4)
 
+        # Pestaña Desvíos
+        frame_faults = tk.Frame(notebook)
+        notebook.add(frame_faults, text="  Desvíos  ")
+
+        tree_faults_frame = tk.Frame(frame_faults)
+        tree_faults_frame.pack(fill=tk.BOTH, expand=True)
+
+        tree_faults = ttk.Treeview(tree_faults_frame, show='headings')
+        vsb_faults = ttk.Scrollbar(tree_faults_frame, orient="vertical", command=tree_faults.yview)
+        hsb_faults = ttk.Scrollbar(tree_faults_frame, orient="horizontal", command=tree_faults.xview)
+        tree_faults.configure(yscrollcommand=vsb_faults.set, xscrollcommand=hsb_faults.set)
+        tree_faults.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb_faults.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb_faults.pack(side=tk.BOTTOM, fill=tk.X)
+
+        lbl_no_faults = tk.Label(frame_faults, text="", font=("Arial", 10, "italic"), fg="#888888")
+        lbl_no_faults.pack(pady=4)
+
         # ── Función auxiliar para poblar un Treeview ──
         def _poblar_tree(tree, docs, lbl_vacio, nombre_col):
             tree.delete(*tree.get_children())
@@ -286,9 +305,11 @@ class MongoApp:
                 coll_orders = db[self.coll_1]
                 coll_parts  = db[self.coll_2]
                 coll_claims = db[self.coll_3]
+                coll_faults = db[self.coll_4]
 
                 query_orders = _build_query(coll_orders, numero_orden)
                 query_parts  = _build_query(coll_parts,  numero_orden)
+                query_faults = _build_query(coll_faults, numero_orden)
                 # Transformación de prefijo para búsqueda en claims:
                 # 20xxxxx → 02xxxxx        (ej: 2012345 → 0212345)
                 # 60xxxxx → 26xxxxx        (ej: 6012345 → 2612345)
@@ -306,21 +327,24 @@ class MongoApp:
                 orders_docs = list(coll_orders.find(query_orders)) if query_orders else []
                 parts_docs  = list(coll_parts.find(query_parts))   if query_parts  else []
                 claims_docs = list(coll_claims.find(query_claims)) if query_claims else []
+                faults_docs = list(coll_faults.find(query_faults)) if query_faults else []
 
-                total = len(orders_docs) + len(parts_docs) + len(claims_docs)
+                total = len(orders_docs) + len(parts_docs) + len(claims_docs) + len(faults_docs)
                 if total == 0:
                     lbl_estado.config(text=f"Sin resultados para '{numero_orden}'.", fg="#c62828")
                 else:
                     lbl_estado.config(
                         text=(f"{len(orders_docs)} orden(es) · "
                               f"{len(parts_docs)} pieza(s) · "
-                              f"{len(claims_docs)} reclamo(s) encontrados."),
+                              f"{len(claims_docs)} reclamo(s) · "
+                              f"{len(faults_docs)} desvío(s) encontrados."),
                         fg="#2e7d32"
                     )
 
                 _poblar_tree(tree_orders, orders_docs, lbl_no_orders, "órdenes")
                 _poblar_tree(tree_parts,  parts_docs,  lbl_no_parts,  "piezas")
                 _poblar_tree(tree_claims, claims_docs, lbl_no_claims, "reclamos")
+                _poblar_tree(tree_faults, faults_docs, lbl_no_faults, "desvíos")
 
                 # Ir a la pestaña con resultados (prioriza órdenes)
                 if orders_docs:
@@ -329,6 +353,8 @@ class MongoApp:
                     notebook.select(frame_parts)
                 elif claims_docs:
                     notebook.select(frame_claims)
+                elif faults_docs:
+                    notebook.select(frame_faults)
 
             except Exception as e:
                 lbl_estado.config(text="Error de conexión.", fg="#c62828")
@@ -339,6 +365,86 @@ class MongoApp:
         btn_buscar.config(command=buscar)
         entrada.bind("<Return>", buscar)
         entrada.focus()
+
+    # ──────────────────────────────────────────────
+    #  INGRESAR DESVÍO
+    # ──────────────────────────────────────────────
+    def open_fault_form(self):
+        win = tk.Toplevel(self.root)
+        win.title("Ingresar Desvío")
+        win.geometry("480x380")
+        win.resizable(False, False)
+
+        DESVIOS = [
+            "Faltó revalidar",
+            "Sin Diss",
+            "Sin material",
+            "Material incorrecto",
+            "Vale sin firma/s",
+        ]
+
+        pad = {"padx": 16, "pady": (6, 0)}
+
+        # ── Orden ──
+        tk.Label(win, text="Orden *", font=("Arial", 10, "bold"), anchor="w").pack(fill=tk.X, **pad)
+        orden_var = tk.StringVar()
+        tk.Entry(win, textvariable=orden_var, font=("Arial", 11)).pack(fill=tk.X, padx=16, ipady=3)
+
+        # ── Desvío ──
+        tk.Label(win, text="Desvío *", font=("Arial", 10, "bold"), anchor="w").pack(fill=tk.X, **pad)
+        desvio_var = tk.StringVar(value=DESVIOS[0])
+        ttk.Combobox(
+            win, textvariable=desvio_var,
+            values=DESVIOS, state="readonly",
+            font=("Arial", 11)
+        ).pack(fill=tk.X, padx=16, ipady=3)
+
+        # ── Comentario ──
+        tk.Label(win, text="Comentario", font=("Arial", 10, "bold"), anchor="w").pack(fill=tk.X, **pad)
+        comentario_txt = tk.Text(win, font=("Arial", 11), height=5, relief=tk.SUNKEN)
+        comentario_txt.pack(fill=tk.X, padx=16, pady=(0, 4))
+
+        # ── Feedback y botón ──
+        lbl_feedback = tk.Label(win, text="", font=("Arial", 9, "italic"))
+        lbl_feedback.pack(pady=(2, 0))
+
+        def guardar():
+            orden = orden_var.get().strip()
+            desvio = desvio_var.get().strip()
+            comentario = comentario_txt.get("1.0", tk.END).strip()
+
+            if not orden:
+                messagebox.showwarning("Campo requerido", "El campo Orden es obligatorio.", parent=win)
+                return
+            if not desvio:
+                messagebox.showwarning("Campo requerido", "Seleccioná un Desvío.", parent=win)
+                return
+
+            doc = {
+                "orden": orden,
+                "desvio": desvio,
+                "comentario": comentario,
+                "fecha": datetime.now(),
+            }
+
+            try:
+                client = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=2000)
+                db = client[self.db_name]
+                db[self.coll_4].insert_one(doc)
+                lbl_feedback.config(text="✔ Desvío guardado correctamente.", fg="#2e7d32")
+                orden_var.set("")
+                desvio_var.set(DESVIOS[0])
+                comentario_txt.delete("1.0", tk.END)
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo guardar:\n{e}", parent=win)
+
+        tk.Button(
+            win, text="Guardar desvío",
+            font=("Arial", 10, "bold"),
+            bg="#1a6eb5", fg="white",
+            relief=tk.FLAT, padx=12, pady=4,
+            command=guardar
+        ).pack(pady=(4, 0))
 
     # ──────────────────────────────────────────────
     #  ASISTENTE DE GARANTÍA
